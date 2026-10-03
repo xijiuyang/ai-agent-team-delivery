@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<!--
+  拼豆图纸生成器 · 核心算法最小 Demo
+  ============================================================================
+  ⚠️ 这是从完整项目 pindou-studio 抽取的核心算法演示，非完整产品。
+     完整版（已上线：https://pindou-pattern-74l.pages.dev）还包含：
+     对齐 Pillow 的定点 Lanczos 重采样、中值降噪、用量百分比（最大余数法）、
+     Web Worker 主线程隔离、分块导出 ZIP、多品牌色卡切换、使用统计与反馈等。
+
+  本 Demo 保留的核心：
+    1. sRGB → CIE Lab(D65) 转换 + 最近邻匹配（engine-core.js）
+    2. 可选 Floyd–Steinberg 抖动（含色度误差自适应衰减，engine-core.js）
+    3. 网格绘制（10×10 分区线；格子边长 ≥ 14px 时格内写色号——与完整版同规则）
+    4. 色号用量清单（按用量降序）
+
+  使用方式：双击本文件用浏览器打开即可，零构建、零依赖、零 CDN。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>拼豆图纸生成器 · 核心算法 Demo</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; margin: 0; background: #f5f6fa; color: #2c3e50; }
+  header { background: #3949ab; color: #fff; padding: 14px 20px; }
+  header h1 { margin: 0; font-size: 18px; }
+  header p { margin: 4px 0 0; font-size: 12px; opacity: .85; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  .panel { background: #fff; border-radius: 8px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  .panel h2 { font-size: 15px; margin: 0 0 10px; }
+  label { font-size: 13px; margin-right: 8px; }
+  button { background: #3949ab; border: none; color: #fff; padding: 8px 18px; border-radius: 5px; font-size: 14px; cursor: pointer; }
+  button:disabled { background: #b0b3c7; cursor: not-allowed; }
+  button.secondary { background: #fff; color: #3949ab; border: 1px solid #3949ab; }
+  input[type="number"] { width: 70px; padding: 6px; border: 1px solid #ccd0e0; border-radius: 4px; }
+  .presets button { padding: 4px 12px; margin-right: 6px; }
+  .opts { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin-top: 10px; }
+  .drop { border: 2px dashed #aab2d0; border-radius: 8px; padding: 26px; text-align: center; color: #667; font-size: 14px; cursor: pointer; }
+  .drop.hover { border-color: #3949ab; background: #eef0fb; }
+  canvas { max-width: 100%; height: auto; image-rendering: pixelated; border: 1px solid #e0e3ef; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border: 1px solid #e0e3ef; padding: 5px 9px; text-align: left; }
+  th { background: #f0f2fa; }
+  .swatch { display: inline-block; width: 16px; height: 16px; border: 1px solid #999; vertical-align: middle; }
+  #status { font-size: 13px; color: #666; min-height: 18px; }
+  #meta { font-size: 13px; color: #555; }
+  .gridwrap { overflow: auto; max-height: 70vh; }
+</style>
+</head>
+<body>
+<header>
+  <h1>拼豆图纸生成器 · 核心算法 Demo</h1>
+  <p>从完整项目抽取的最小演示：Lab 色彩空间最近邻量化 + 可选 Floyd–Steinberg 抖动（含色度误差自适应衰减）</p>
+</header>
+<main>
+  <div class="panel">
+    <h2>1. 选择图片</h2>
+    <div class="drop" id="drop">拖拽图片到这里，或点击选择（PNG / JPG / WEBP / GIF）</div>
+    <input type="file" id="file" accept="image/*" hidden>
+  </div>
+
+  <div class="panel">
+    <h2>2. 参数</h2>
+    <label>网格宽度（颗，10~96）</label>
+    <input type="number" id="width" min="10" max="96" value="48">
+    <div class="presets" style="margin-top:8px">
+      <label>常用档位：</label>
+      <button class="secondary preset" data-w="29">29</button>
+      <button class="secondary preset" data-w="48">48</button>
+      <button class="secondary preset" data-w="58">58</button>
+      <button class="secondary preset" data-w="96">96</button>
+    </div>
+    <div class="opts">
+      <label><input type="checkbox" id="dither"> 抖动（Floyd–Steinberg，让渐变更细腻，手工拼建议关）</label>
+      <label>最大用色数 <input type="number" id="maxColors" min="0" max="64" value="0">（0 = 不限）</label>
+      <button id="go" disabled>生成图纸</button>
+    </div>
+    <p id="status"></p>
+  </div>
+
+  <div class="panel" id="resultPanel" hidden>
+    <h2>3. 图纸预览</h2>
+    <p id="meta"></p>
+    <div class="gridwrap"><canvas id="canvas"></canvas></div>
+  </div>
+
+  <div class="panel" id="usagePanel" hidden>
+    <h2>4. 色号用量清单（按用量降序）</h2>
+    <table>
+      <thead><tr><th>色块</th><th>色号</th><th>色名</th><th>数量（颗）</th></tr></thead>
+      <tbody id="usageBody"></tbody>
+    </table>
+  </div>
+</main>
+
+<script>
+/* ========================================================================
+ * 色卡数据：逐条摘自完整项目 backend/palettes/perler.json（Perler 42 色），
+ * 未做任何修改。完整项目内置 4 个品牌色卡（Artkal 64 / COCO 60 / 漫漫 56 /
+ * Perler 42），此处仅内置 1 套用于演示。
+ * ====================================================================== */
+var PERLER_PALETTE = [
+  { code: "P01", name: "白色", hex: "#FFFFFF" },
+  { code: "P02", name: "米白", hex: "#EDE4D3" },
+  { code: "P03", name: "浅灰", hex: "#D5D5D5" },
+  { code: "P04", name: "深灰", hex: "#5E5E5E" },
+  { code: "P05", name: "炭灰", hex: "#3B3B3B" },
+  { code: "P06", name: "红色", hex: "#E23B2E" },
+  { code: "P07", name: "大红", hex: "#D0021B" },
+  { code: "P08", name: "酒红", hex: "#7A1F2B" },
+  { code: "P09", name: "珊瑚红", hex: "#FF6F61" },
+  { code: "P10", name: "粉红", hex: "#FF8FB1" },
+  { code: "P11", name: "桃粉", hex: "#FFB3C6" },
+  { code: "P12", name: "玫瑰红", hex: "#E75480" },
+  { code: "P13", name: "橘红", hex: "#FF5A2E" },
+  { code: "P14", name: "明橙", hex: "#FFA733" },
+  { code: "P15", name: "土黄", hex: "#C8A165" },
+  { code: "P16", name: "棕色", hex: "#8B5A2B" },
+  { code: "P17", name: "浅棕", hex: "#C19A6B" },
+  { code: "P18", name: "卡其", hex: "#C3B091" },
+  { code: "P19", name: "黄色", hex: "#FFE94A" },
+  { code: "P20", name: "金黄", hex: "#FFC107" },
+  { code: "P21", name: "柠檬黄", hex: "#F5F043" },
+  { code: "P22", name: "奶油黄", hex: "#FFF6C9" },
+  { code: "P23", name: "绿色", hex: "#4CAF50" },
+  { code: "P24", name: "深绿", hex: "#1E5E2A" },
+  { code: "P25", name: "墨绿", hex: "#2E4B3C" },
+  { code: "P26", name: "薄荷绿", hex: "#9BF6C4" },
+  { code: "P27", name: "翠绿", hex: "#00A86B" },
+  { code: "P28", name: "青绿", hex: "#20B2AA" },
+  { code: "P29", name: "天蓝", hex: "#8FD3F0" },
+  { code: "P30", name: "深蓝", hex: "#1A237E" },
+  { code: "P31", name: "湖蓝", hex: "#00BCD4" },
+  { code: "P32", name: "青蓝", hex: "#5FD0E0" },
+  { code: "P33", name: "靛蓝", hex: "#3F51B5" },
+  { code: "P34", name: "深紫", hex: "#4A148C" },
+  { code: "P35", name: "浅紫", hex: "#D1C4E9" },
+  { code: "P36", name: "洋红", hex: "#E91E63" },
+  { code: "P37", name: "葡萄紫", hex: "#6B2D5C" },
+  { code: "P38", name: "浅肤色", hex: "#FFE9D8" },
+  { code: "P39", name: "深肤色", hex: "#C68642" },
+  { code: "P40", name: "荧光绿", hex: "#CCFF33" },
+  { code: "P41", name: "荧光粉", hex: "#FF3DCE" },
+  { code: "P42", name: "银色", hex: "#C0C0C0" }
+];
+</script>
+<script src="engine-core.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  var els = {
+    drop: document.getElementById('drop'),
+    file: document.getElementById('file'),
+    width: document.getElementById('width'),
+    dither: document.getElementById('dither'),
+    maxColors: document.getElementById('maxColors'),
+    go: document.getElementById('go'),
+    status: document.getElementById('status'),
+    meta: document.getElementById('meta'),
+    canvas: document.getElementById('canvas'),
+    resultPanel: document.getElementById('resultPanel'),
+    usagePanel: document.getElementById('usagePanel'),
+    usageBody: document.getElementById('usageBody')
+  };
+
+  var img = null;          // 当前选中的图片（HTMLImageElement）
+  var CELL = 14;           // 画布上每格的像素边长
+  var MIN_CODE_CELL = 14;  // 格子边长 ≥ 14px 才在格内写色号（与完整版同规则）
+
+  /* ---------- 图片选择 ---------- */
+  els.drop.addEventListener('click', function () { els.file.click(); });
+  els.file.addEventListener('change', function () {
+    if (els.file.files && els.file.files[0]) loadFile(els.file.files[0]);
+  });
+  els.drop.addEventListener('dragover', function (e) {
+    e.preventDefault(); els.drop.classList.add('hover');
+  });
+  els.drop.addEventListener('dragleave', function () { els.drop.classList.remove('hover'); });
+  els.drop.addEventListener('drop', function (e) {
+    e.preventDefault(); els.drop.classList.remove('hover');
+    var f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) loadFile(f);
+  });
+
+  function loadFile(f) {
+    if (!/^image\//.test(f.type)) { setStatus('请选择图片文件（PNG / JPG / WEBP / GIF）'); return; }
+    var url = URL.createObjectURL(f);
+    var image = new Image();
+    image.onload = function () {
+      img = image;
+      els.go.disabled = false;
+      setStatus('已加载：' + f.name + '（' + image.naturalWidth + '×' + image.naturalHeight + '），点击「生成图纸」');
+    };
+    image.onerror = function () {
+      img = null;
+      els.go.disabled = true;
+      setStatus('图片解码失败，请换一张试试');
+    };
+    image.src = url;
+  }
+
+  function setStatus(msg) { els.status.textContent = msg; }
+
+  document.querySelectorAll('.preset').forEach(function (b) {
+    b.addEventListener('click', function () { els.width.value = b.dataset.w; });
+  });
+
+  /* ---------- 生成 ---------- */
+  els.go.addEventListener('click', function () {
+    if (!img) return;
+    var w = parseInt(els.width.value, 10);
+    if (!(w >= 10 && w <= 96)) { setStatus('网格宽度需在 10~96 之间'); return; }
+    // 高度按原图比例换算，clamp 到 [10, 96]（与完整版「锁定等比」同思路）
+    var h = Math.round(w * img.naturalHeight / img.naturalWidth);
+    h = Math.max(10, Math.min(96, h));
+
+    setStatus('正在生成…');
+    els.go.disabled = true;
+    // 让状态先渲染出来，再进入同步计算
+    setTimeout(function () {
+      try {
+        var t0 = performance.now();
+        var rgba = imageToResizedRGBA(img, w, h);
+        var result = PindouEngineCore.quantize(rgba, w, h, PERLER_PALETTE, {
+          dither: els.dither.checked,
+          maxColors: parseInt(els.maxColors.value, 10) || 0
+        });
+        var t1 = performance.now();
+        drawPattern(result, w, h);
+        renderUsage(result);
+        els.meta.textContent = '色卡 Perler · 网格 ' + w + '×' + h + ' · 用色 ' +
+          result.usage.length + ' 种 · 共 ' + result.totalBeads + ' 颗 · 耗时 ' +
+          Math.round(t1 - t0) + 'ms（缩放走 canvas，量化为同步计算）';
+        els.resultPanel.hidden = false;
+        els.usagePanel.hidden = false;
+        setStatus('生成完成。提示：右键 / 长按画布可保存图片。');
+      } catch (err) {
+        setStatus('生成失败：' + (err && err.message ? err.message : err));
+      } finally {
+        els.go.disabled = false;
+      }
+    }, 30);
+  });
+
+  /** 解码 + 缩放为 RGBA。
+   *  注意：完整版为逐位复刻 Pillow 的定点 Lanczos-3 重采样（731 行 engine.js 的
+   *  主要篇幅），Demo 版用 canvas drawImage 缩放 —— 两者存在重采样差异，
+   *  不影响演示「Lab 最近邻 + 抖动」这一算法核心。 */
+  function imageToResizedRGBA(image, w, h) {
+    var c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    var ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(image, 0, 0, w, h);
+    // 用完立刻缩到 1×1 释放（大图这里是几百 MB，与完整版同做法）
+    var keep = ctx.getImageData(0, 0, w, h);
+    c.width = 1; c.height = 1;
+    return keep.data;
+  }
+
+  /* ---------- 绘制图纸：格子 + 10×10 分区线 + （可选）格内色号 ---------- */
+  function drawPattern(result, w, h) {
+    var canvas = els.canvas;
+    var showCode = CELL >= MIN_CODE_CELL;
+    canvas.width = w * CELL + 1;   // +1 给最右侧/最下侧边线留位
+    canvas.height = h * CELL + 1;
+    var ctx = canvas.getContext('2d');
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    var hexByCode = {};
+    PERLER_PALETTE.forEach(function (c) { hexByCode[c.code] = c.hex; });
+
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        var code = result.grid[y][x];
+        if (code == null) continue;
+        ctx.fillStyle = hexByCode[code] || '#dddddd';
+        ctx.fillRect(x * CELL + 1, y * CELL + 1, CELL - 1, CELL - 1);
+        if (showCode) {
+          ctx.fillStyle = '#000000';
+          ctx.font = (CELL - 4) + 'px monospace';
+          ctx.fillText(code, x * CELL + 2, y * CELL + CELL - 2);
+        }
+      }
+    }
+
+    // 普通网格线（细、半透明）
+    ctx.strokeStyle = 'rgba(0,0,0,.25)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (var gx = 0; gx <= w; gx++) {
+      ctx.moveTo(gx * CELL + 0.5, 0); ctx.lineTo(gx * CELL + 0.5, canvas.height);
+    }
+    for (var gy = 0; gy <= h; gy++) {
+      ctx.moveTo(0, gy * CELL + 0.5); ctx.lineTo(canvas.width, gy * CELL + 0.5);
+    }
+    ctx.stroke();
+
+    // 10×10 分区线（粗、深色）—— 大图纸分块拼时靠它定位
+    ctx.strokeStyle = 'rgba(0,0,0,.85)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (var px = 0; px <= w; px += 10) {
+      ctx.moveTo(px * CELL, 0); ctx.lineTo(px * CELL, canvas.height);
+    }
+    for (var py = 0; py <= h; py += 10) {
+      ctx.moveTo(0, py * CELL); ctx.lineTo(canvas.width, py * CELL);
+    }
+    ctx.stroke();
+  }
+
+  /* ---------- 用量清单 ---------- */
+  function renderUsage(result) {
+    els.usageBody.innerHTML = '';
+    result.usage.forEach(function (u) {
+      var tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td><span class="swatch" style="background:' + u.hex + '"></span></td>' +
+        '<td>' + u.code + '</td><td>' + u.name + '</td><td>' + u.count + '</td>';
+      els.usageBody.appendChild(tr);
+    });
+  }
+})();
+</script>
+</body>
+</html>
